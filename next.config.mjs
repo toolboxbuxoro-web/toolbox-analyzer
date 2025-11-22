@@ -1,6 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  /* config options here */
+  // Отключаем Turbopack для стабильности
+  experimental: {
+    turbo: {
+      root: process.cwd(),
+    }
+  }
 };
 
 export default nextConfig;
