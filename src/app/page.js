@@ -49,9 +49,15 @@ export default function Home() {
         <p className="subtitle">
           Оптимизируйте свой инвентарь, определяя товары, доступные на складе, но отсутствующие в магазинах.
         </p>
-        <div style={{ marginTop: '1rem' }}>
+        <div style={{ marginTop: '1rem', display: 'flex', gap: '1.5rem', justifyContent: 'center', flexWrap: 'wrap' }}>
           <a href="/sales-analysis" style={{ color: '#60a5fa', textDecoration: 'none', fontSize: '1rem' }}>
             → Анализ продаж
+          </a>
+          <a href="/below-cost" style={{ color: '#fca5a5', textDecoration: 'none', fontSize: '1rem' }}>
+            → Ниже себестоимости
+          </a>
+          <a href="/smartup" style={{ color: '#a78bfa', textDecoration: 'none', fontSize: '1rem' }}>
+            → SmartUp товары
           </a>
         </div>
       </header>

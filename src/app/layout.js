@@ -33,6 +33,9 @@ export default function RootLayout({ children }) {
               <Link href="/sales-analysis" className="nav-link">
                 Анализ продаж
               </Link>
+              <Link href="/below-cost" className="nav-link">
+                Ниже себестоимости
+              </Link>
             </div>
           </div>
         </nav>

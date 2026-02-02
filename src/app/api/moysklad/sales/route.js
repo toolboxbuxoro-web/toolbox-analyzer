@@ -48,47 +48,72 @@ export async function POST(request) {
       );
     }
 
-    // Получаем данные о прибыльности
-    // ВАЖНО: Для отчета о прибыльности используем retailStore (розничная точка), а не store
+    // --------------------------------------------------------------------------------
+    // 1. ПОЛУЧЕНИЕ ДАННЫХ ИЗ ОТЧЕТА ПО ПРИБЫЛЬНОСТИ
+    // --------------------------------------------------------------------------------
+    // Мы используем этот отчет как основной источник сумм, так как он агрегирует продажи и возвраты
+
+    let totalSellSum = 0;   // Сумма продаж (в копейках)
+    let totalReturnSum = 0; // Сумма возвратов (в копейках)
+    const limit = 1000;
+
+    // Формируем базовый URL для отчета
     let profitUrl = `https://api.moysklad.ru/api/remap/1.2/report/profit/byproduct?momentFrom=${encodeURIComponent(momentFrom)}&momentTo=${encodeURIComponent(momentTo)}`;
 
-    // Если указаны склады, добавляем фильтр через retailStore с полным URL
+    // Фильтр по складам (store)
     if (warehouseIds && warehouseIds.length > 0) {
-      // Для отчета о прибыльности используем retailStore с полным href
       const storeFilters = warehouseIds
-        .map(id => `retailStore=https://api.moysklad.ru/api/remap/1.2/entity/retailstore/${id}`)
+        .map(id => `store=https://api.moysklad.ru/api/remap/1.2/entity/store/${id}`)
         .join(';');
       profitUrl += `&filter=${encodeURIComponent(storeFilters)}`;
     }
 
-    const profitResponse = await fetch(profitUrl, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-    });
+    // Пагинация для отчета
+    let offset = 0;
+    let hasMore = true;
 
-    if (!profitResponse.ok) {
-      const errorText = await profitResponse.text();
-      console.error('Ошибка API Мой склад (прибыльность):', errorText);
-      // Не прерываем выполнение - пробуем получить данные из retailsales
+    while (hasMore) {
+      const url = `${profitUrl}&limit=${limit}&offset=${offset}`;
+      const response = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+
+        // Суммируем продажи и возвраты из строк отчета
+        if (data.rows && Array.isArray(data.rows)) {
+          data.rows.forEach(row => {
+            totalSellSum += (row.sellSum || 0);
+            totalReturnSum += (row.returnSum || 0);
+          });
+        }
+
+        const fetchedCount = data.rows?.length || 0;
+        if (fetchedCount < limit || offset + fetchedCount >= (data.meta?.size || 0)) {
+          hasMore = false;
+        } else {
+          offset += limit;
+        }
+      } else {
+        console.error('Ошибка при получении отчета по прибыльности:', response.status);
+        // Если отчет недоступен, мы не можем гарантировать точность данных
+        // Но продолжаем выполнение, чтобы попытаться получить хотя бы кол-во чеков
+        hasMore = false;
+      }
     }
 
-    let profitData = { rows: [] };
-    if (profitResponse.ok) {
-      profitData = await profitResponse.json();
-    }
+    const grossSales = totalSellSum / 100;
+    const totalReturns = totalReturnSum / 100;
+    const actualSales = grossSales - totalReturns;
+
+    console.log(`Profit Report -> SellSum: ${grossSales}, ReturnSum: ${totalReturns}, Net: ${actualSales}`);
 
     // --------------------------------------------------------------------------------
-    // 1. ПОЛУЧЕНИЕ ПРОДАЖ (РОЗНИЦА + ОТГРУЗКИ/ОПТ)
+    // 2. ПОЛУЧЕНИЕ КОЛИЧЕСТВА ЧЕКОВ (retaildemand)
     // --------------------------------------------------------------------------------
 
-    let totalSales = 0;
-    let checkCount = 0; // Общее количество документов продажи
-    const limit = 1000;
-
-    // A. Розничные продажи (retaildemand)
+    let checkCount = 0;
     let retailSalesUrl = `https://api.moysklad.ru/api/remap/1.2/entity/retaildemand?filter=moment>=${encodeURIComponent(momentFrom)};moment<=${encodeURIComponent(momentTo)}`;
 
     if (warehouseIds && warehouseIds.length > 0) {
@@ -98,46 +123,26 @@ export async function POST(request) {
       retailSalesUrl += `;${storeFilters}`;
     }
 
-    let offset = 0;
-    let hasMore = true;
-
-    while (hasMore) {
-      const url = `${retailSalesUrl}&limit=${limit}&offset=${offset}`;
-      const response = await fetch(url, {
+    // Нам нужно только количество, поэтому делаем один запрос с limit=1 если нужно было бы просто count,
+    // но API МойСклад отдает meta.size, который показывает общее кол-во.
+    // Достаточно одного запроса
+    try {
+      const response = await fetch(`${retailSalesUrl}&limit=1`, {
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       });
-
       if (response.ok) {
         const data = await response.json();
-        if (offset === 0) checkCount += (data.meta?.size || 0);
-
-        const pageSum = data.rows?.reduce((sum, item) => sum + (parseFloat(item.sum) || 0), 0) || 0;
-        totalSales += pageSum;
-
-        const fetchedCount = data.rows?.length || 0;
-        if (fetchedCount < limit || offset + fetchedCount >= (data.meta?.size || 0)) {
-          hasMore = false;
-        } else {
-          offset += limit;
-        }
-      } else {
-        hasMore = false;
-        console.error('Ошибка при получении retaildemand');
+        checkCount = data.meta?.size || 0;
       }
+    } catch (e) {
+      console.error('Ошибка при получении checkCount', e);
     }
 
-    // (Блок получения отгрузок/опта удален для соответствия розничным данным)
-
-    totalSales = totalSales / 100; // Конвертируем из копеек в рубли/сумы
-
     // --------------------------------------------------------------------------------
-    // 2. ПОЛУЧЕНИЕ ВОЗВРАТОВ (РОЗНИЦА + ОПТ)
+    // 3. ПОЛУЧЕНИЕ КОЛИЧЕСТВА ВОЗВРАТОВ (retailsalesreturn)
     // --------------------------------------------------------------------------------
 
-    let totalReturns = 0;
-    let returnsCount = 0; // Общее количество документов возврата
-
-    // C. Розничные возвраты (retailsalesreturn)
+    let returnsCount = 0;
     let retailReturnsUrl = `https://api.moysklad.ru/api/remap/1.2/entity/retailsalesreturn?filter=moment>=${encodeURIComponent(momentFrom)};moment<=${encodeURIComponent(momentTo)}`;
 
     if (warehouseIds && warehouseIds.length > 0) {
@@ -147,57 +152,17 @@ export async function POST(request) {
       retailReturnsUrl += `;${storeFilters}`;
     }
 
-    offset = 0;
-    hasMore = true;
-
-    while (hasMore) {
-      const url = `${retailReturnsUrl}&limit=${limit}&offset=${offset}`;
-      const response = await fetch(url, {
+    try {
+      const response = await fetch(`${retailReturnsUrl}&limit=1`, {
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       });
-
       if (response.ok) {
         const data = await response.json();
-        if (offset === 0) returnsCount += (data.meta?.size || 0);
-
-        const pageSum = data.rows?.reduce((sum, item) => sum + (parseFloat(item.sum) || 0), 0) || 0;
-        totalReturns += pageSum;
-
-        const fetchedCount = data.rows?.length || 0;
-        if (fetchedCount < limit || offset + fetchedCount >= (data.meta?.size || 0)) {
-          hasMore = false;
-        } else {
-          offset += limit;
-        }
-      } else {
-        hasMore = false;
-        console.error('Ошибка при получении retailsalesreturn');
+        returnsCount = data.meta?.size || 0;
       }
+    } catch (e) {
+      console.error('Ошибка при получении returnsCount', e);
     }
-
-    // (Блок получения оптовых возвратов удален для соответствия розничным данным)
-
-    totalReturns = totalReturns / 100; // Конвертируем из копеек
-
-    console.log(`Продажи: ${totalSales}, Возвраты: ${totalReturns}, Чистые продажи: ${totalSales - totalReturns}`);
-
-    // Рассчитываем метрики из данных о прибыльности
-    // В отчете о прибыльности может быть поле sellPrice (цена продажи) или quantity * price
-    const totalProfit = profitData.rows?.reduce((sum, item) => {
-      // Пробуем разные поля для суммы продаж
-      const sellPrice = parseFloat(item.sellPrice) || 0;
-      const quantity = parseFloat(item.quantity) || 0;
-      const price = parseFloat(item.price) || 0;
-      const revenue = sellPrice || (quantity * price);
-      return sum + revenue;
-    }, 0) || 0;
-
-    // Используем totalSales если он больше, иначе totalProfit
-    // totalSales берется из документов розничных продаж (более точные данные)
-    const grossSales = totalSales > 0 ? totalSales : totalProfit;
-
-    // Вычитаем возвраты из продаж
-    const actualSales = grossSales - totalReturns;
 
     return NextResponse.json({
       actual: actualSales,
@@ -206,7 +171,7 @@ export async function POST(request) {
       returnsCount: returnsCount,   // Количество возвратов
       checkCount: checkCount,
       averageCheck: checkCount > 0 ? actualSales / checkCount : 0,
-      visitors: 0, // Пока не доступно из API, можно добавить позже
+      visitors: 0,
     });
   } catch (error) {
     console.error('Ошибка при получении данных о продажах:', error);
